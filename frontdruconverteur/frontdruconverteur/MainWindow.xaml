@@ -1,0 +1,25 @@
+﻿<Window x:Class="frontdruconverteur.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Convertisseur" Height="450" Width="800">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Zone pour glisser le dossier -->
+        <Border Grid.Row="0" BorderThickness="2" BorderBrush="Gray" Background="LightGray" 
+                AllowDrop="True" DragEnter="Border_DragEnter" Drop="Border_Drop" Padding="10">
+            <StackPanel>
+                <TextBlock Text="Glissez et déposez un dossier ici" FontSize="16" FontWeight="Bold" 
+                           HorizontalAlignment="Center" Margin="0,0,0,10"/>
+                <ListBox Name="FileListBox" Height="300"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Bouton de conversion -->
+        <Button Grid.Row="1" Content="Convertir en un script SQL" Margin="0,10,0,0" Padding="5" 
+                HorizontalAlignment="Center" Width="200" Click="ConvertButton_Click"/>
+    </Grid>
+</Window>
