@@ -3,38 +3,30 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using IOCompression = System.IO.Compression; // alias pour éviter les conflits
-using System.IO.Packaging; // NuGet: System.IO.Packaging (fallback OPC)
+using IOCompression = System.IO.Compression;
+using System.IO.Packaging; // NuGet: System.IO.Packaging
 using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
-// NuGet: SharpCompress
-using SharpCompress.Archives;
+using SharpCompress.Archives; // NuGet: SharpCompress
 using SharpCompress.Common;
+using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace frontdruconverteur
 {
     public partial class MainWindow : Window
     {
-        // ====== Réglages ======
+        // ===== Réglages =====
         private const bool GenerateBaseTablesToo = true;
-
-        // Renseigne ici le chemin vers ton .alpackages si besoin
-        private const string SymbolsFolderOverride = @"D:\Workspace\Report-122-Project\repport-122\.alpackages";
-
-        // Logs détaillés (met à true si besoin de debug)
         private const bool VerboseSymbolLogging = false;
-
-        // Mode agressif: tenter d'autres JSON plausibles si aucun SymbolReference n'est détecté
         private const bool AggressiveParseAnyJsonInApp = true;
-
-        // Debug 7-Zip: garder les dossiers extraits (sinon ils sont supprimés)
         private const bool KeepExtractedTemp = false;
 
-        // ====== État ======
+        // État
         private readonly List<string> tableFilePaths = new List<string>();
         private string currentRootFolder = null;
 
@@ -130,7 +122,7 @@ namespace frontdruconverteur
                 Console.WriteLine(message);
                 System.Diagnostics.Debug.WriteLine(message);
             }
-            catch { /* ignore */ }
+            catch { }
         }
         #endregion
 
@@ -176,6 +168,8 @@ namespace frontdruconverteur
             public string ReferencedTable;
         }
 
+
+
         private async void ConvertButton_Click(object sender, RoutedEventArgs e)
         {
             if (tableFilePaths.Count == 0)
@@ -188,7 +182,7 @@ namespace frontdruconverteur
 
             try
             {
-                // 1) Parsing AL (BG)
+                // --- Parsing des objets AL ---
                 var parsedObjects = await Task.Run(() =>
                 {
                     var list = new List<ParsedObject>();
@@ -207,19 +201,23 @@ namespace frontdruconverteur
                     return;
                 }
 
+                // --- Symboles externes ---
                 SetBusy(true, "Recherche des symboles des .app...");
+                var roots = CollectSymbolSearchRoots(currentRootFolder);
 
-                // 2) Racines des symboles (optim: si override existe, on ne scanne que lui)
-                var roots = CollectSymbolSearchRoots(currentRootFolder, SymbolsFolderOverride);
-
-                // 3) Chargement symboles (BG)
                 var externalBaseTables = await Task.Run(() =>
                     LoadExternalBaseTables(roots, status => UpdateBusy(status))
                 );
 
-                // 4) Post-traitement
-                var baseTables = parsedObjects.Where(o => o.Kind == AlObjectKind.Table).Select(o => o.Table).ToList();
-                var extensions = parsedObjects.Where(o => o.Kind == AlObjectKind.TableExtension).Select(o => o.TableExtension).ToList();
+                var baseTables = parsedObjects
+                    .Where(o => o.Kind == AlObjectKind.Table)
+                    .Select(o => o.Table)
+                    .ToList();
+
+                var extensions = parsedObjects
+                    .Where(o => o.Kind == AlObjectKind.TableExtension)
+                    .Select(o => o.TableExtension)
+                    .ToList();
 
                 var baseTableMap = baseTables
                     .GroupBy(t => NormalizeName(t.TableName), StringComparer.OrdinalIgnoreCase)
@@ -235,19 +233,38 @@ namespace frontdruconverteur
                     AppendLog($"[FLATTEN] Base '{ext.BaseTableName}' -> internal:{foundInternal} external:{foundExternal}");
                 }
 
+                // --- Génération du SQL ---
                 SetBusy(true, "Génération du script SQL...");
-
                 string sqlScript = await Task.Run(() => GenerateSQLScript(baseTables, flattenedTables));
 
+                // --- Sauvegarde ---
                 var dlg = new SaveFileDialog
                 {
                     FileName = "Convertisseur.sql",
                     Filter = "Fichier SQL (*.sql)|*.sql"
                 };
+
                 if (dlg.ShowDialog() == true)
                 {
                     File.WriteAllText(dlg.FileName, sqlScript, Encoding.UTF8);
-                    MessageBox.Show("Le script SQL a été généré.", "OK", MessageBoxButton.OK, MessageBoxImage.Information);
+                    SetBusy(false);
+
+                    // --- Proposer l'affichage du MLD ---
+                    var result = MessageBox.Show(
+                        "Le script SQL a été généré avec succès.\n\nSouhaitez-vous afficher le MLD maintenant ?",
+                        "Script généré",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question
+                    );
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        // Crée et affiche la fenêtre MLD + LiveCharts
+                        var mldWindow = new MldWindow();
+                        mldWindow.Owner = this;
+                        mldWindow.LoadScript(sqlScript); // charge le SQL et génère le MLD
+                        mldWindow.ShowDialog();
+                    }
                 }
             }
             catch (Exception ex)
@@ -259,6 +276,8 @@ namespace frontdruconverteur
                 SetBusy(false);
             }
         }
+
+
 
         private TableDefinition MergeTables(List<TableDefinition> defs)
         {
@@ -285,7 +304,6 @@ namespace frontdruconverteur
                     result.ForeignKeys.Add(fk);
                 }
             }
-
             return result;
         }
 
@@ -301,6 +319,102 @@ namespace frontdruconverteur
         {
             if (string.IsNullOrWhiteSpace(name)) return name;
             return name.StartsWith("M_", StringComparison.OrdinalIgnoreCase) ? name : "M_" + name;
+        }
+
+        // Garantit un type SQL cohérent pour une colonne
+        // Une seule fonction qui renvoie le type SQL final pour une colonne,
+        // en tenant compte (dans l'ordre) de SQLType existant, ALType, heuristiques Business Central,
+        // et TableRelation (clé étrangère probable).
+        private string ResolveSqlType(ColumnDefinition col)
+        {
+            // 0) Sécurités de base
+            string Safe(string s) => (s ?? "").Trim();
+            string al = Safe(col.ALType);
+            string sql = Safe(col.SQLType);
+            string name = Safe(col.ColumnName).Trim('"');
+            string rel = Safe(col.TableRelation);
+
+            // 1) Si un SQLType fort est déjà présent (et pas "text"), on le garde
+            if (!string.IsNullOrWhiteSpace(sql) && !sql.Equals("text", StringComparison.OrdinalIgnoreCase))
+                return sql;
+
+            // 2) Mappage direct depuis ALType si disponible (robuste, sans dépendance externe)
+            //    - Code[n]  -> varchar(n)
+            //    - Text[n]  -> varchar(n) (Text[Max] -> text)
+            //    - Decimal[p,s] -> decimal(p,s) (sinon decimal(38,20))
+            //    - Integer/BigInteger/Date/Time/DateTime/Boolean/Guid/BLOB/Media/MediaSet/MediaLink/Enum/Option
+            if (!string.IsNullOrWhiteSpace(al))
+            {
+                string alLower = al.ToLowerInvariant();
+
+                // helpers inline
+                int? ExtractLen(string x)
+                {
+                    int lb = x.IndexOf('['); int rb = x.IndexOf(']');
+                    if (lb >= 0 && rb > lb)
+                    {
+                        var inside = x.Substring(lb + 1, rb - lb - 1).Trim();
+                        if (inside.Equals("max", StringComparison.OrdinalIgnoreCase)) return null;
+                        var comma = inside.IndexOf(',');
+                        var first = comma >= 0 ? inside.Substring(0, comma) : inside;
+                        if (int.TryParse(first, out int n)) return n;
+                    }
+                    return null;
+                }
+                (int? p, int? s) ExtractPrecScale(string x)
+                {
+                    int lb = x.IndexOf('['); int rb = x.IndexOf(']');
+                    if (lb >= 0 && rb > lb)
+                    {
+                        var inside = x.Substring(lb + 1, rb - lb - 1).Trim();
+                        var parts = inside.Split(new[] { ',', ':', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                                          .Select(t => t.Trim()).ToArray();
+                        int? P = null, S = null;
+                        if (parts.Length >= 1 && int.TryParse(parts[0], out int p1)) P = p1;
+                        if (parts.Length >= 2 && int.TryParse(parts[1], out int s1)) S = s1;
+                        return (P, S);
+                    }
+                    return (null, null);
+                }
+
+                if (alLower.StartsWith("code"))
+                {
+                    var len = ExtractLen(al) ?? 50;
+                    return $"varchar({len})";
+                }
+                if (alLower.StartsWith("text"))
+                {
+                    var len = ExtractLen(al);
+                    return len.HasValue ? $"varchar({len.Value})" : "text";
+                }
+                if (alLower.StartsWith("decimal"))
+                {
+                    var (p, s) = ExtractPrecScale(al);
+                    return $"decimal({p ?? 38},{s ?? 20})";
+                }
+                if (alLower.Equals("integer")) return "int";
+                if (alLower.Equals("biginteger")) return "bigint";
+                if (alLower.Equals("date")) return "date";
+                if (alLower.Equals("time")) return "time";
+                if (alLower.Equals("datetime")) return "datetime";
+                if (alLower.Equals("boolean")) return "boolean";
+                if (alLower.Equals("guid")) return "char(36)";
+                if (alLower.Equals("blob") || alLower.Equals("mediaset") || alLower.Equals("media") || alLower.Equals("medialink")) return "blob";
+                if (alLower.StartsWith("enum") || alLower.Equals("option")) return "int";
+            }
+
+            // 3) Heuristique Business Central pour les colonnes "No." (très répandu -> Code[20])
+            //    Si l'ALType n'est pas exploitable mais que le nom est "No" ou "No.", on force Code[20] => varchar(20)
+            string nameNoPunct = name.Replace(".", "").Trim();
+            if (nameNoPunct.Equals("No", StringComparison.OrdinalIgnoreCase))
+                return "varchar(20)";
+
+            // 4) Heuristique clé étrangère probable (TableRelation présente) -> souvent des Code[20]
+            if (!string.IsNullOrWhiteSpace(rel))
+                return "varchar(20)";
+
+            // 5) Dernier recours: éviter de retomber en text non typé, préférer une taille raisonnable
+            return "varchar(250)";
         }
 
         private List<TableDefinition> BuildFlattenedTables(
@@ -334,7 +448,7 @@ namespace frontdruconverteur
                         {
                             ColumnName = baseIsMicrosoft ? PrefixMicrosoft(c.ColumnName) : c.ColumnName,
                             ALType = c.ALType,
-                            SQLType = ResolveSqlType(c), // garanti de donner un type exploitable
+                            SQLType = ResolveSqlType(c),
                             TableRelation = c.TableRelation
                         };
                         flat.Columns.Add(cloned);
@@ -386,34 +500,36 @@ namespace frontdruconverteur
             return flattened;
         }
 
-        private List<string> CollectSymbolSearchRoots(string rootFolder, string overridePath)
+        private List<string> CollectSymbolSearchRoots(string projectRoot)
         {
             var roots = new List<string>();
 
-            // OPTIM: si override existe, on se limite à ce dossier
-            if (!string.IsNullOrWhiteSpace(overridePath) && Directory.Exists(overridePath))
-            {
-                roots.Add(overridePath);
-                AppendLog($"[SYMBOL SEARCH ROOTS]\n  - {overridePath}");
+            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
                 return roots;
-            }
 
-            if (!string.IsNullOrWhiteSpace(rootFolder))
+            // 1) Ajoute le dossier projet lui-même
+            roots.Add(projectRoot);
+
+            // 2) Ajoute le .alpackages à la racine du projet s'il existe
+            var rootAlpkg = Path.Combine(projectRoot, ".alpackages");
+            if (Directory.Exists(rootAlpkg))
+                roots.Add(rootAlpkg);
+
+            // 3) Ajoute tous les .alpackages trouvés n'importe où SOUS le projet (multi-apps)
+            try
             {
-                var cur = new DirectoryInfo(rootFolder);
-                while (cur != null && cur.Parent != null)
+                foreach (var dir in Directory.EnumerateDirectories(projectRoot, ".alpackages", SearchOption.AllDirectories))
                 {
-                    roots.Add(cur.FullName);
-                    var alpkg = Path.Combine(cur.FullName, ".alpackages");
-                    if (Directory.Exists(alpkg))
-                        roots.Add(alpkg);
-                    cur = cur.Parent;
+                    roots.Add(dir);
                 }
             }
+            catch
+            {
+                // ignore: accès refusé éventuels
+            }
 
-            roots = roots.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            AppendLog($"[SYMBOL SEARCH ROOTS]\n  - {string.Join("\n  - ", roots)}");
-            return roots;
+            // 4) Déduplique et retourne
+            return roots.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
 
         private Dictionary<string, TableDefinition> LoadExternalBaseTables(List<string> searchRoots, Action<string> reportStatus = null)
@@ -576,30 +692,24 @@ namespace frontdruconverteur
                 if (VerboseSymbolLogging) AppendLog($"[APP ENTRY ZIP] {appPathForLog} :: {e.FullName}");
                 yield return new SymbolStreamInfo { Stream = e.Open(), EntryName = e.FullName };
             }
-
             foreach (var e in za.Entries.Where(e => e.FullName.EndsWith("SymbolReference.json.gz", StringComparison.OrdinalIgnoreCase)))
             {
-                if (VerboseSymbolLogging) AppendLog($"[APP ENTRY ZIP GZ] {appPathForLog} :: {e.FullName}");
                 var ms = new MemoryStream();
                 using (var gz = new IOCompression.GZipStream(e.Open(), IOCompression.CompressionMode.Decompress, leaveOpen: false))
                     gz.CopyTo(ms);
                 ms.Position = 0;
                 yield return new SymbolStreamInfo { Stream = ms, EntryName = e.FullName };
             }
-
             foreach (var e in za.Entries.Where(e => e.FullName.EndsWith("SymbolReference.json.br", StringComparison.OrdinalIgnoreCase)))
             {
-                if (VerboseSymbolLogging) AppendLog($"[APP ENTRY ZIP BR] {appPathForLog} :: {e.FullName}");
                 var ms = new MemoryStream();
                 using (var br = new IOCompression.BrotliStream(e.Open(), IOCompression.CompressionMode.Decompress, leaveOpen: false))
                     br.CopyTo(ms);
                 ms.Position = 0;
                 yield return new SymbolStreamInfo { Stream = ms, EntryName = e.FullName };
             }
-
             foreach (var e in za.Entries.Where(e => e.FullName.IndexOf("symbolreference", StringComparison.OrdinalIgnoreCase) >= 0))
             {
-                if (VerboseSymbolLogging) AppendLog($"[APP ENTRY ZIP ANY] {appPathForLog} :: {e.FullName}");
                 if (e.FullName.EndsWith(".gz", StringComparison.OrdinalIgnoreCase))
                 {
                     var ms = new MemoryStream();
@@ -621,45 +731,6 @@ namespace frontdruconverteur
                     yield return new SymbolStreamInfo { Stream = e.Open(), EntryName = e.FullName };
                 }
             }
-
-            if (AggressiveParseAnyJsonInApp)
-            {
-                var otherJsons = za.Entries.Where(e =>
-                        e.FullName.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
-                        e.FullName.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase) ||
-                        e.FullName.EndsWith(".json.br", StringComparison.OrdinalIgnoreCase))
-                    .Where(e => e.FullName.IndexOf("symbol", StringComparison.OrdinalIgnoreCase) >= 0
-                             || e.FullName.IndexOf("reference", StringComparison.OrdinalIgnoreCase) >= 0
-                             || e.FullName.IndexOf("metadata", StringComparison.OrdinalIgnoreCase) >= 0
-                             || e.FullName.IndexOf("objects", StringComparison.OrdinalIgnoreCase) >= 0)
-                    .Take(10)
-                    .ToList();
-
-                foreach (var e in otherJsons)
-                {
-                    if (VerboseSymbolLogging) AppendLog($"[APP ENTRY ZIP FALLBACK] {appPathForLog} :: {e.FullName}");
-                    MemoryStream ms = new MemoryStream();
-                    using (var src = e.Open())
-                    {
-                        if (e.FullName.EndsWith(".gz", StringComparison.OrdinalIgnoreCase))
-                        {
-                            using var gz = new IOCompression.GZipStream(src, IOCompression.CompressionMode.Decompress, leaveOpen: false);
-                            gz.CopyTo(ms);
-                        }
-                        else if (e.FullName.EndsWith(".br", StringComparison.OrdinalIgnoreCase))
-                        {
-                            using var br = new IOCompression.BrotliStream(src, IOCompression.CompressionMode.Decompress, leaveOpen: false);
-                            br.CopyTo(ms);
-                        }
-                        else
-                        {
-                            src.CopyTo(ms);
-                        }
-                    }
-                    ms.Position = 0;
-                    yield return new SymbolStreamInfo { Stream = ms, EntryName = e.FullName };
-                }
-            }
         }
 
         // SharpCompress (.zip exotiques)
@@ -670,97 +741,28 @@ namespace frontdruconverteur
 
             foreach (var entry in arc.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith("SymbolReference.json", StringComparison.OrdinalIgnoreCase)))
             {
-                if (VerboseSymbolLogging) AppendLog($"[APP ENTRY SHARP] {appPath} :: {entry.Key}");
                 var ms = new MemoryStream();
                 using (var es = entry.OpenEntryStream()) es.CopyTo(ms);
                 ms.Position = 0;
                 yield return new SymbolStreamInfo { Stream = ms, EntryName = entry.Key };
             }
-
             foreach (var entry in arc.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith("SymbolReference.json.gz", StringComparison.OrdinalIgnoreCase)))
             {
-                if (VerboseSymbolLogging) AppendLog($"[APP ENTRY SHARP GZ] {appPath} :: {entry.Key}");
-                var decompressed = new MemoryStream();
-                using (var es = entry.OpenEntryStream())
-                using (var gz = new IOCompression.GZipStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false))
-                    gz.CopyTo(decompressed);
-                decompressed.Position = 0;
-                yield return new SymbolStreamInfo { Stream = decompressed, EntryName = entry.Key };
-            }
-
-            foreach (var entry in arc.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith("SymbolReference.json.br", StringComparison.OrdinalIgnoreCase)))
-            {
-                if (VerboseSymbolLogging) AppendLog($"[APP ENTRY SHARP BR] {appPath} :: {entry.Key}");
-                var decompressed = new MemoryStream();
-                using (var es = entry.OpenEntryStream())
-                using (var br = new IOCompression.BrotliStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false))
-                    br.CopyTo(decompressed);
-                decompressed.Position = 0;
-                yield return new SymbolStreamInfo { Stream = decompressed, EntryName = entry.Key };
-            }
-
-            foreach (var entry in arc.Entries.Where(e => !e.IsDirectory && e.Key.IndexOf("symbolreference", StringComparison.OrdinalIgnoreCase) >= 0))
-            {
-                if (VerboseSymbolLogging) AppendLog($"[APP ENTRY SHARP ANY] {appPath} :: {entry.Key}");
                 var ms = new MemoryStream();
                 using (var es = entry.OpenEntryStream())
-                {
-                    if (entry.Key.EndsWith(".gz", StringComparison.OrdinalIgnoreCase))
-                    {
-                        using var gz = new IOCompression.GZipStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false);
-                        gz.CopyTo(ms);
-                    }
-                    else if (entry.Key.EndsWith(".br", StringComparison.OrdinalIgnoreCase))
-                    {
-                        using var br = new IOCompression.BrotliStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false);
-                        br.CopyTo(ms);
-                    }
-                    else
-                    {
-                        es.CopyTo(ms);
-                    }
-                }
+                using (var gz = new IOCompression.GZipStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false))
+                    gz.CopyTo(ms);
                 ms.Position = 0;
                 yield return new SymbolStreamInfo { Stream = ms, EntryName = entry.Key };
             }
-
-            if (AggressiveParseAnyJsonInApp)
+            foreach (var entry in arc.Entries.Where(e => !e.IsDirectory && e.Key.EndsWith("SymbolReference.json.br", StringComparison.OrdinalIgnoreCase)))
             {
-                var other = arc.Entries.Where(e =>
-                        !e.IsDirectory && (e.Key.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-                                        || e.Key.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase)
-                                        || e.Key.EndsWith(".json.br", StringComparison.OrdinalIgnoreCase)))
-                    .Where(e => e.Key.IndexOf("symbol", StringComparison.OrdinalIgnoreCase) >= 0
-                             || e.Key.IndexOf("reference", StringComparison.OrdinalIgnoreCase) >= 0
-                             || e.Key.IndexOf("metadata", StringComparison.OrdinalIgnoreCase) >= 0
-                             || e.Key.IndexOf("objects", StringComparison.OrdinalIgnoreCase) >= 0)
-                    .Take(10)
-                    .ToList();
-
-                foreach (var entry in other)
-                {
-                    if (VerboseSymbolLogging) AppendLog($"[APP ENTRY SHARP FALLBACK] {appPath} :: {entry.Key}");
-                    var ms = new MemoryStream();
-                    using (var es = entry.OpenEntryStream())
-                    {
-                        if (entry.Key.EndsWith(".gz", StringComparison.OrdinalIgnoreCase))
-                        {
-                            using var gz = new IOCompression.GZipStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false);
-                            gz.CopyTo(ms);
-                        }
-                        else if (entry.Key.EndsWith(".br", StringComparison.OrdinalIgnoreCase))
-                        {
-                            using var br = new IOCompression.BrotliStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false);
-                            br.CopyTo(ms);
-                        }
-                        else
-                        {
-                            es.CopyTo(ms);
-                        }
-                    }
-                    ms.Position = 0;
-                    yield return new SymbolStreamInfo { Stream = ms, EntryName = entry.Key };
-                }
+                var ms = new MemoryStream();
+                using (var es = entry.OpenEntryStream())
+                using (var br = new IOCompression.BrotliStream(es, IOCompression.CompressionMode.Decompress, leaveOpen: false))
+                    br.CopyTo(ms);
+                ms.Position = 0;
+                yield return new SymbolStreamInfo { Stream = ms, EntryName = entry.Key };
             }
         }
 
@@ -769,7 +771,7 @@ namespace frontdruconverteur
         {
             string sevenZip = Find7ZipExe();
             if (string.IsNullOrEmpty(sevenZip))
-                throw new InvalidOperationException("7z.exe introuvable. Installe 7‑Zip (https://www.7-zip.org/) ou mets 7z.exe dans le PATH.");
+                throw new InvalidOperationException("7z.exe introuvable. Installe 7‑Zip ou mets 7z.exe dans le PATH.");
 
             reportStatus?.Invoke($"Liste du contenu...\n{Path.GetFileName(appPath)}");
             var listArgs = $"l -slt -ba \"{appPath}\"";
@@ -875,7 +877,6 @@ namespace frontdruconverteur
                     }
 
                     var relName = extractedPath.Substring(tempRoot.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                    if (VerboseSymbolLogging) AppendLog($"[APP ENTRY 7Z] {appPath} :: {relName}");
                     yield return new SymbolStreamInfo { Stream = toYield, EntryName = relName };
                 }
             }
@@ -883,16 +884,11 @@ namespace frontdruconverteur
             {
                 if (!KeepExtractedTemp)
                 {
-                    try { Directory.Delete(tempRoot, recursive: true); } catch { /* ignore */ }
-                }
-                else
-                {
-                    AppendLog($"[DEBUG] Dossier 7‑Zip conservé: {tempRoot}");
+                    try { Directory.Delete(tempRoot, recursive: true); } catch { }
                 }
             }
         }
 
-        // Localise 7z.exe (Program Files x64/x86 ou PATH)
         private string Find7ZipExe()
         {
             var candidates = new[]
@@ -929,12 +925,11 @@ namespace frontdruconverteur
                         return c;
                     }
                 }
-                catch { /* ignore */ }
+                catch { }
             }
             return null;
         }
 
-        // Exécute un process et retourne stdout (UTF-8)
         private string RunProcessAndGetStdOut(string exe, string args, int timeoutMs)
         {
             var psi = new ProcessStartInfo
@@ -961,7 +956,7 @@ namespace frontdruconverteur
                 try { p.Kill(); } catch { }
                 throw new TimeoutException($"{exe} a dépassé le délai ({timeoutMs} ms)");
             }
-            if (p.ExitCode != 0 && p.ExitCode != 1) // 1 = warnings acceptables
+            if (p.ExitCode != 0 && p.ExitCode != 1)
                 throw new InvalidOperationException($"{exe} a échoué ({p.ExitCode}): {sbErr}");
             return sbOut.ToString();
         }
@@ -972,45 +967,7 @@ namespace frontdruconverteur
             catch { return Array.Empty<string>(); }
         }
 
-        private IEnumerable<JsonElement> EnumerateTableLikeObjects(JsonElement root)
-        {
-            var stack = new Stack<JsonElement>();
-            stack.Push(root);
-
-            while (stack.Count > 0)
-            {
-                var node = stack.Pop();
-
-                if (node.ValueKind == JsonValueKind.Object)
-                {
-                    bool isTable =
-                        (TryGetProperty(node, "Type", out var tp) && tp.ValueKind == JsonValueKind.String && string.Equals(tp.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
-                     || (TryGetProperty(node, "Kind", out var kd) && kd.ValueKind == JsonValueKind.String && string.Equals(kd.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
-                     || (TryGetProperty(node, "ObjectType", out var ot) && ot.ValueKind == JsonValueKind.String && string.Equals(ot.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
-                     || (TryGetProperty(node, "ALObjectType", out var at) && at.ValueKind == JsonValueKind.String && string.Equals(at.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
-                     || (TryGetProperty(node, "SymbolKind", out var sk) && sk.ValueKind == JsonValueKind.String && string.Equals(sk.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
-                     || (TryGetProperty(node, "Fields", out var fields) && fields.ValueKind == JsonValueKind.Array);
-
-                    if (isTable)
-                        yield return node;
-
-                    foreach (var prop in node.EnumerateObject())
-                    {
-                        if (prop.Value.ValueKind == JsonValueKind.Array || prop.Value.ValueKind == JsonValueKind.Object)
-                            stack.Push(prop.Value);
-                    }
-                }
-                else if (node.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var item in node.EnumerateArray())
-                    {
-                        if (item.ValueKind == JsonValueKind.Array || item.ValueKind == JsonValueKind.Object)
-                            stack.Push(item);
-                    }
-                }
-            }
-        }
-
+        // ===== SymbolReference parsing (FIABILISÉ) =====
         private void ParseSymbolReferenceJson(Stream jsonStream, Dictionary<string, TableDefinition> tables)
         {
             var options = new JsonDocumentOptions
@@ -1048,6 +1005,7 @@ namespace frontdruconverteur
                     else if (TryGetProperty(tableObj, "Members", out var membersElem) && membersElem.ValueKind == JsonValueKind.Array)
                         ParseSymbolFields(membersElem, tableDef);
 
+                    // PK
                     bool pkSet = false;
                     if (TryGetProperty(tableObj, "PrimaryKey", out var pk) && pk.ValueKind == JsonValueKind.Object)
                     {
@@ -1097,25 +1055,57 @@ namespace frontdruconverteur
             }
         }
 
+        // Détection des objets "Table" dans le JSON
+        private IEnumerable<JsonElement> EnumerateTableLikeObjects(JsonElement root)
+        {
+            var stack = new Stack<JsonElement>();
+            stack.Push(root);
+
+            while (stack.Count > 0)
+            {
+                var node = stack.Pop();
+
+                if (node.ValueKind == JsonValueKind.Object)
+                {
+                    bool isTable =
+                        (TryGetProperty(node, "Type", out var tp) && tp.ValueKind == JsonValueKind.String && string.Equals(tp.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
+                     || (TryGetProperty(node, "Kind", out var kd) && kd.ValueKind == JsonValueKind.String && string.Equals(kd.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
+                     || (TryGetProperty(node, "ObjectType", out var ot) && ot.ValueKind == JsonValueKind.String && string.Equals(ot.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
+                     || (TryGetProperty(node, "ALObjectType", out var at) && at.ValueKind == JsonValueKind.String && string.Equals(at.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
+                     || (TryGetProperty(node, "SymbolKind", out var sk) && sk.ValueKind == JsonValueKind.String && string.Equals(sk.GetString(), "Table", StringComparison.OrdinalIgnoreCase))
+                     || (TryGetProperty(node, "Fields", out var fields) && fields.ValueKind == JsonValueKind.Array);
+
+                    if (isTable)
+                        yield return node;
+
+                    foreach (var prop in node.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.Array || prop.Value.ValueKind == JsonValueKind.Object)
+                            stack.Push(prop.Value);
+                    }
+                }
+                else if (node.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in node.EnumerateArray())
+                    {
+                        if (item.ValueKind == JsonValueKind.Array || item.ValueKind == JsonValueKind.Object)
+                            stack.Push(item);
+                    }
+                }
+            }
+        }
+
+        // Lecture des champs (SymbolReference) avec prise en compte des longueurs au niveau champ
         private void ParseSymbolFields(JsonElement fieldsArray, TableDefinition tableDef)
         {
             foreach (var f in fieldsArray.EnumerateArray())
             {
                 if (f.ValueKind != JsonValueKind.Object) continue;
+
                 string fieldName = GetString(f, "Name");
                 if (string.IsNullOrWhiteSpace(fieldName)) continue;
 
-                string sqlType = "text";
-                string alType = null;
-
-                if (TryGetProperty(f, "Type", out var ftype) && ftype.ValueKind == JsonValueKind.Object)
-                {
-                    (sqlType, alType) = MapSymbolTypeToSqlAndAl(ftype);
-                }
-                else if (TryGetProperty(f, "DataType", out var dtype) && dtype.ValueKind == JsonValueKind.Object)
-                {
-                    (sqlType, alType) = MapSymbolTypeToSqlAndAl(dtype);
-                }
+                var (sqlType, alType) = InferTypeFromField(f);
 
                 string tableRel = null;
                 if (TryGetProperty(f, "Relation", out var rel) && rel.ValueKind == JsonValueKind.Object)
@@ -1127,6 +1117,13 @@ namespace frontdruconverteur
                 else if (TryGetProperty(f, "TableRelation", out var tr) && tr.ValueKind == JsonValueKind.String)
                 {
                     tableRel = tr.GetString();
+                }
+                else
+                {
+                    // parfois dans Properties
+                    string trProp = GetPropertyValueFromProperties(f, "TableRelation");
+                    if (!string.IsNullOrWhiteSpace(trProp))
+                        tableRel = trProp;
                 }
 
                 var col = new ColumnDefinition
@@ -1153,26 +1150,220 @@ namespace frontdruconverteur
             }
         }
 
-        // Typage robuste: si SQLType inconnu/"text" mais ALType présent, re-mappe
-        private string ResolveSqlType(ColumnDefinition col)
+        // Déduit le type (SQL + AL) depuis un élément champ
+        private (string sqlType, string alType) InferTypeFromField(JsonElement f)
         {
-            if (!string.IsNullOrWhiteSpace(col.SQLType) &&
-                !col.SQLType.Equals("text", StringComparison.OrdinalIgnoreCase))
+            // Si Type est objet, on mappe via MapSymbolTypeToSqlAndAl, puis on renforce avec tailles éventuelles au niveau champ
+            if (TryGetProperty(f, "Type", out var t))
             {
-                return col.SQLType;
+                if (t.ValueKind == JsonValueKind.Object)
+                {
+                    var (sql, al) = MapSymbolTypeToSqlAndAlWithFieldSizing(t, f);
+                    return (sql, al);
+                }
+                else if (t.ValueKind == JsonValueKind.String)
+                {
+                    var typeName = t.GetString();
+                    return MapTypeNameWithFieldSizing(typeName, f);
+                }
             }
 
-            if (!string.IsNullOrWhiteSpace(col.ALType))
+            // DataType alternatif
+            if (TryGetProperty(f, "DataType", out var dt))
             {
-                var mapped = MapALTypeToSQL(col.ALType);
-                if (!string.IsNullOrWhiteSpace(mapped))
-                    return mapped;
+                if (dt.ValueKind == JsonValueKind.Object)
+                {
+                    var (sql, al) = MapSymbolTypeToSqlAndAlWithFieldSizing(dt, f);
+                    return (sql, al);
+                }
+                else if (dt.ValueKind == JsonValueKind.String)
+                {
+                    var typeName = dt.GetString();
+                    return MapTypeNameWithFieldSizing(typeName, f);
+                }
             }
 
-            return "text";
+            // A défaut: si longueur connue au niveau champ, suppose Text
+            var (length, precision, scale) = GetFieldSizing(f);
+            if (length.HasValue)
+                return ($"varchar({length.Value})", $"Text[{length.Value}]");
+
+            if (precision.HasValue && scale.HasValue)
+                return ($"decimal({precision.Value},{scale.Value})", $"Decimal[{precision.Value},{scale.Value}]");
+
+            return ("text", null);
         }
 
-        // Map des types SymbolReference -> SQL + AL
+        // Version MapSymbolTypeToSqlAndAl qui tient compte des tailles au niveau champ
+        private (string sqlType, string alType) MapSymbolTypeToSqlAndAlWithFieldSizing(JsonElement typeElem, JsonElement fieldElem)
+        {
+            var (sql, al) = MapSymbolTypeToSqlAndAl(typeElem);
+            // Si Code/Text sans taille explicite dans typeElem, regarde le champ
+            var (length, precision, scale) = GetFieldSizing(fieldElem);
+
+            if (al != null && al.StartsWith("Code[", StringComparison.OrdinalIgnoreCase) || GetTypeName(typeElem).Equals("code", StringComparison.OrdinalIgnoreCase))
+            {
+                int len = length ?? ExtractLengthFromAl(al) ?? 50;
+                return ($"varchar({len})", $"Code[{len}]");
+            }
+            if (al != null && al.StartsWith("Text[", StringComparison.OrdinalIgnoreCase) || GetTypeName(typeElem).Equals("text", StringComparison.OrdinalIgnoreCase))
+            {
+                int len = length ?? ExtractLengthFromAl(al) ?? 250;
+                return ($"varchar({len})", $"Text[{len}]");
+            }
+            if (GetTypeName(typeElem).Equals("decimal", StringComparison.OrdinalIgnoreCase))
+            {
+                int p = precision ?? 38;
+                int s = scale ?? 20;
+                return ($"decimal({p},{s})", $"Decimal[{p},{s}]");
+            }
+
+            return (sql, al);
+        }
+
+        private string GetTypeName(JsonElement typeElem)
+        {
+            return GetString(typeElem, "Name")
+                ?? GetString(typeElem, "Kind")
+                ?? GetString(typeElem, "PrimitiveType")
+                ?? GetString(typeElem, "TypeName")
+                ?? "";
+        }
+
+        private int? ExtractLengthFromAl(string alType)
+        {
+            if (string.IsNullOrWhiteSpace(alType)) return null;
+            int lb = alType.IndexOf('[');
+            int rb = alType.IndexOf(']');
+            if (lb >= 0 && rb > lb)
+            {
+                string content = alType.Substring(lb + 1, rb - lb - 1);
+                if (content.Equals("Max", StringComparison.OrdinalIgnoreCase)) return null;
+                if (int.TryParse(content.Split(',')[0], out int n)) return n;
+            }
+            return null;
+        }
+
+        // Map depuis string TypeName + tailles du champ
+        private (string sqlType, string alType) MapTypeNameWithFieldSizing(string typeName, JsonElement fieldElem)
+        {
+            string name = (typeName ?? "").Trim().ToLowerInvariant();
+            var (length, precision, scale) = GetFieldSizing(fieldElem);
+
+            switch (name)
+            {
+                case "code":
+                    {
+                        int len = length ?? 50;
+                        return ($"varchar({len})", $"Code[{len}]");
+                    }
+                case "text":
+                    {
+                        int len = length ?? 250;
+                        return ($"varchar({len})", $"Text[{len}]");
+                    }
+                case "integer": return ("int", "Integer");
+                case "biginteger": return ("bigint", "BigInteger");
+                case "decimal":
+                    {
+                        int p = precision ?? 38;
+                        int s = scale ?? 20;
+                        return ($"decimal({p},{s})", $"Decimal[{p},{s}]");
+                    }
+                case "date": return ("date", "Date");
+                case "time": return ("time", "Time");
+                case "datetime": return ("datetime", "DateTime");
+                case "boolean": return ("boolean", "Boolean");
+                case "guid": return ("char(36)", "Guid");
+                case "blob":
+                case "media":
+                case "mediaset":
+                case "medialink":
+                    return ("blob", "BLOB");
+                case "enum": return ("int", "Enum");
+                case "option": return ("int", "Option");
+                default: return ("text", null);
+            }
+        }
+
+        // Récupère Length/MaxLength ou DecimalPlaces au niveau du champ, y compris dans Properties
+        private (int? length, int? precision, int? scale) GetFieldSizing(JsonElement f)
+        {
+            int? length = GetInt(f, "Length") ?? GetInt(f, "MaxLength") ?? GetIntFromProperties(f, "Length") ?? GetIntFromProperties(f, "MaxLength");
+            int? precision = GetInt(f, "Precision") ?? GetIntFromProperties(f, "Precision");
+            int? scale = GetInt(f, "Scale") ?? GetIntFromProperties(f, "Scale");
+
+            // DecimalPlaces dans Properties ex: "38:20"
+            string decPlaces = GetPropertyValueFromProperties(f, "DecimalPlaces");
+            if (!string.IsNullOrWhiteSpace(decPlaces))
+            {
+                var parts = decPlaces.Split(new[] { ':', ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 1 && int.TryParse(parts[0], out int p)) precision = precision ?? p;
+                if (parts.Length >= 2 && int.TryParse(parts[1], out int s)) scale = scale ?? s;
+            }
+
+            return (length, precision, scale);
+        }
+
+        private int? GetIntFromProperties(JsonElement f, string propName)
+        {
+            if (TryGetProperty(f, "Properties", out var props))
+            {
+                if (props.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var p in props.EnumerateArray())
+                    {
+                        string name = GetString(p, "Name");
+                        if (!string.IsNullOrWhiteSpace(name) && name.Equals(propName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Value peut être number ou string
+                            if (TryGetProperty(p, "Value", out var val))
+                            {
+                                if (val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out int n)) return n;
+                                if (val.ValueKind == JsonValueKind.String && int.TryParse(val.GetString(), out int m)) return m;
+                            }
+                        }
+                    }
+                }
+                else if (props.ValueKind == JsonValueKind.Object)
+                {
+                    // format alternatif: Properties { Length: 50, ... }
+                    if (TryGetProperty(props, propName, out var val))
+                    {
+                        if (val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out int n)) return n;
+                        if (val.ValueKind == JsonValueKind.String && int.TryParse(val.GetString(), out int m)) return m;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private string GetPropertyValueFromProperties(JsonElement f, string propName)
+        {
+            if (TryGetProperty(f, "Properties", out var props))
+            {
+                if (props.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var p in props.EnumerateArray())
+                    {
+                        string name = GetString(p, "Name");
+                        if (!string.IsNullOrWhiteSpace(name) && name.Equals(propName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (TryGetProperty(p, "Value", out var val) && val.ValueKind == JsonValueKind.String)
+                                return val.GetString();
+                        }
+                    }
+                }
+                else if (props.ValueKind == JsonValueKind.Object)
+                {
+                    if (TryGetProperty(props, propName, out var val) && val.ValueKind == JsonValueKind.String)
+                        return val.GetString();
+                }
+            }
+            return null;
+        }
+
+        // Map SymbolReference (objet type) -> SQL + AL (base, sans les tailles du champ)
         private (string sqlType, string alType) MapSymbolTypeToSqlAndAl(JsonElement typeElem)
         {
             string name =
@@ -1213,7 +1404,11 @@ namespace frontdruconverteur
                 case "datetime": return ("datetime", "DateTime");
                 case "boolean": return ("boolean", "Boolean");
                 case "guid": return ("char(36)", "Guid");
-                case "blob": return ("blob", "BLOB");
+                case "blob":
+                case "media":
+                case "mediaset":
+                case "medialink":
+                    return ("blob", "BLOB");
                 case "enum": return ("int", "Enum");
                 case "option": return ("int", "Option");
                 default:
@@ -1243,7 +1438,7 @@ namespace frontdruconverteur
             return null;
         }
 
-        // Mapping AL -> SQL (pour parsing direct des .al)
+        // Mapping AL -> SQL (pour parsing direct .al)
         private static readonly Dictionary<string, string> AlTypeToSqlType = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             { "Code[10]", "varchar(10)" }, { "Code[20]", "varchar(20)" }, { "Code[30]", "varchar(30)" },
@@ -1262,7 +1457,7 @@ namespace frontdruconverteur
 
         private string MapALTypeToSQL(string alType)
         {
-            alType = alType.Trim();
+            alType = alType?.Trim() ?? "";
 
             if (AlTypeToSqlType.TryGetValue(alType, out string sqlType))
                 return sqlType;
@@ -1312,6 +1507,7 @@ namespace frontdruconverteur
             return normalized;
         }
 
+        // ===== Parsing .al (projet) =====
         private ParsedObject ParseALObject(string filePath)
         {
             string content;
@@ -1517,8 +1713,6 @@ namespace frontdruconverteur
 
                 if (!table.Columns.Any())
                 {
-                    sb.AppendLine($"-- Warning: Table `{normalizedTableName}` est vide et n'a pas été générée (base manquante ?).");
-                    sb.AppendLine();
                     continue;
                 }
 
@@ -1562,7 +1756,6 @@ namespace frontdruconverteur
 
                     if (referencedTableDef == null)
                     {
-                        sb.AppendLine($"-- Warning: Table référencée `{normalizedReferencedTable}` non trouvée pour FK sur `{normalizedFkColumn}` dans `{normalizedTableName}`.");
                         continue;
                     }
 

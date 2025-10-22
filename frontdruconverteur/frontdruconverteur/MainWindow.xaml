@@ -1,33 +1,151 @@
 ﻿<Window x:Class="frontdruconverteur.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Convertisseur" Height="450" Width="800">
-    <Grid Margin="10">
+        Title="Convertisseur"
+        Height="500"
+        Width="850"
+        WindowStartupLocation="CenterScreen"
+        Background="#f4f6f8">
+
+    <Window.Resources>
+        <!-- Dégradé principal -->
+        <LinearGradientBrush x:Key="PrimaryGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#4F9DFE" Offset="0"/>
+            <GradientStop Color="#6CD6FF" Offset="1"/>
+        </LinearGradientBrush>
+
+        <!-- Style des boutons (attention : pas de Setter CornerRadius direct) -->
+        <Style TargetType="Button" x:Key="PrimaryButton">
+            <Setter Property="Background" Value="{StaticResource PrimaryGradient}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect BlurRadius="8" ShadowDepth="2" Opacity="0.25"/>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <!-- Border ici : on applique CornerRadius sur le Border -->
+                        <Border Background="{TemplateBinding Background}" 
+                                CornerRadius="8"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                              Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Opacity" Value="0.95"/>
+                                <Setter Property="RenderTransform">
+                                    <Setter.Value>
+                                        <ScaleTransform ScaleX="1.02" ScaleY="1.02"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Opacity" Value="0.9"/>
+                                <Setter Property="RenderTransform">
+                                    <Setter.Value>
+                                        <ScaleTransform ScaleX="0.98" ScaleY="0.98"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Style du Border de drop -->
+        <Style TargetType="Border" x:Key="DropZoneStyle">
+            <Setter Property="CornerRadius" Value="10"/>
+            <Setter Property="BorderBrush" Value="#9EB5C2"/>
+            <Setter Property="Background" Value="#E8F0F8"/>
+            <Setter Property="BorderThickness" Value="2"/>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect BlurRadius="10" ShadowDepth="2" Opacity="0.2"/>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Padding" Value="20"/>
+        </Style>
+
+        <!-- Style du ListBox (ne pas essayer d'ajouter CornerRadius ici) -->
+        <Style TargetType="ListBox" x:Key="SimpleListBox">
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="#FFF"/>
+            <Setter Property="Padding" Value="6"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Zone pour glisser le dossier -->
-        <Border Grid.Row="0" BorderThickness="2" BorderBrush="Gray" Background="LightGray" 
-                AllowDrop="True" DragEnter="Border_DragEnter" Drop="Border_Drop" Padding="10">
+        <Border Grid.Row="0"
+                Style="{StaticResource DropZoneStyle}"
+                AllowDrop="True"
+                DragEnter="Border_DragEnter"
+                Drop="Border_Drop">
             <StackPanel>
-                <TextBlock Text="Glissez et déposez un dossier ici" FontSize="16" FontWeight="Bold" 
-                           HorizontalAlignment="Center" Margin="0,0,0,10"/>
-                <ListBox Name="FileListBox" Height="300"/>
+                <TextBlock Text="📁 Glissez et déposez un dossier ici"
+                           FontSize="18"
+                           FontWeight="Bold"
+                           Foreground="#3B3B3B"
+                           HorizontalAlignment="Center"
+                           Margin="0,0,0,12"/>
+
+                <!-- Wrap ListBox inside a Border to get rounded corners -->
+                <Border CornerRadius="8" Background="#FAFAFA" BorderBrush="#D0D0D0" BorderThickness="1">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Height="320">
+                        <ListBox Name="FileListBox"
+                                 Height="320"
+                                 Style="{StaticResource SimpleListBox}"/>
+                    </ScrollViewer>
+                </Border>
             </StackPanel>
         </Border>
 
         <!-- Bouton de conversion -->
-        <Button x:Name="ConvertButton" Grid.Row="1" Content="Convertir en un script SQL" Margin="0,10,0,0" Padding="5" 
-                HorizontalAlignment="Center" Width="200" Click="ConvertButton_Click"/>
+        <Button x:Name="ConvertButton"
+                Grid.Row="1"
+                Content="⚙️ Convertir en script SQL"
+                Margin="0,20,0,0"
+                Width="240"
+                HorizontalAlignment="Center"
+                Click="ConvertButton_Click"
+                Style="{StaticResource PrimaryButton}"/>
 
         <!-- Overlay Loader -->
-        <Grid x:Name="BusyOverlay" Background="#80000000" Visibility="Collapsed">
-            <Border CornerRadius="8" Padding="20" Background="White" HorizontalAlignment="Center" VerticalAlignment="Center">
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <TextBlock x:Name="BusyText" Text="Traitement en cours..." FontSize="14" FontWeight="SemiBold" Margin="0,0,0,10" TextAlignment="Center"/>
-                    <ProgressBar IsIndeterminate="True" Width="250" Height="14"/>
+        <Grid x:Name="BusyOverlay"
+              Background="#80000000"
+              Visibility="Collapsed">
+            <Border CornerRadius="10"
+                    Padding="25"
+                    Background="White"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Center">
+                    <TextBlock x:Name="BusyText"
+                               Text="⏳ Traitement en cours..."
+                               FontSize="15"
+                               FontWeight="SemiBold"
+                               Margin="0,0,0,15"
+                               TextAlignment="Center"/>
+                    <ProgressBar IsIndeterminate="True"
+                                 Width="280"
+                                 Height="16"
+                                 Foreground="{StaticResource PrimaryGradient}"/>
                 </StackPanel>
             </Border>
         </Grid>
