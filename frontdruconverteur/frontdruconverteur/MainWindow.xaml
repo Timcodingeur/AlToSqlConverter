@@ -19,7 +19,17 @@
         </Border>
 
         <!-- Bouton de conversion -->
-        <Button Grid.Row="1" Content="Convertir en un script SQL" Margin="0,10,0,0" Padding="5" 
+        <Button x:Name="ConvertButton" Grid.Row="1" Content="Convertir en un script SQL" Margin="0,10,0,0" Padding="5" 
                 HorizontalAlignment="Center" Width="200" Click="ConvertButton_Click"/>
+
+        <!-- Overlay Loader -->
+        <Grid x:Name="BusyOverlay" Background="#80000000" Visibility="Collapsed">
+            <Border CornerRadius="8" Padding="20" Background="White" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock x:Name="BusyText" Text="Traitement en cours..." FontSize="14" FontWeight="SemiBold" Margin="0,0,0,10" TextAlignment="Center"/>
+                    <ProgressBar IsIndeterminate="True" Width="250" Height="14"/>
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </Window>
