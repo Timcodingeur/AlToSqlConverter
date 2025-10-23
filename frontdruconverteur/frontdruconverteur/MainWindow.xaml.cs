@@ -168,6 +168,29 @@ namespace frontdruconverteur
             public string ReferencedTable;
         }
 
+        private async void ShowMldButton_Click(object sender, EventArgs e)
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Ouvrir un script SQL généré",
+                Filter = "Fichier SQL (*.sql)|*.sql"
+            };
+            if (dlg.ShowDialog() == true)
+            {
+                try
+                {
+                    string sqlScript = await File.ReadAllTextAsync(dlg.FileName, Encoding.UTF8);
+                    var mldWindow = new MldWindow();
+                    mldWindow.Owner = this;
+                    mldWindow.LoadScript(sqlScript);
+                    mldWindow.ShowDialog();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Erreur lors de la lecture du fichier SQL : " + ex.Message, "Erreur", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+        }
 
 
         private async void ConvertButton_Click(object sender, RoutedEventArgs e)

@@ -5,5 +5,5 @@
         Height="600"
         Width="900"
         WindowStartupLocation="CenterOwner">
-    <Grid x:Name="MldContainer" Background="#FAFAFA"/>
+    <Grid x:Name="MldContainer" Background="white"/>
 </Window>
